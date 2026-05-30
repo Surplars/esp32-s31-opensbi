@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: BSD-2-Clause
+
+# ESP32-S31 platform configuration for OpenSBI
+# Build with: make PLATFORM=esp32s31 PLATFORM_RISCV_XLEN=32 PLATFORM_RISCV_ISA=rv32imac CROSS_COMPILE=riscv32-unknown-elf-
+
+CONFIG_PLATFORM_ESP32S31=y
