@@ -1,6 +1,8 @@
 RISC-V Open Source Supervisor Binary Interface (OpenSBI)
 ========================================================
 
+ESP32-S31 port baseline: based on OpenSBI commit 547a5bb.
+
 ![RISC-V OpenSBI](docs/riscv_opensbi_logo_final_color.png)
 
 Copyright and License
