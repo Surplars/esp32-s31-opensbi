@@ -34,7 +34,11 @@
 .macro CLEAR_MDT tmp
 #if __riscv_xlen == 32
 #ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
-	/* ESP32-S31 appears not to tolerate early MSTATUSH MDT writes. */
+	/*
+	 * ESP32-S31 reports privileged architecture v1.11 and does not expose
+	 * Smdbltrp/MDT semantics. This early path runs before C-level CSR
+	 * probing is available, so leave MSTATUSH.MDT untouched here.
+	 */
 #else
 	li	\tmp, MSTATUSH_MDT
 	csrc	CSR_MSTATUSH, \tmp

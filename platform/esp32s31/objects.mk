@@ -3,6 +3,7 @@
 platform-cppflags-y =
 platform-genflags-y = -DOPENSBI_PLATFORM_ESP32S31_CLIC
 platform-genflags-y += -DOPENSBI_PLATFORM_ESP32S31_CLIC_TIMER_IRQ=16
+platform-genflags-y += -DOPENSBI_PLATFORM_ESP32S31_CLIC_IPI_IRQ=17
 
 platform-cflags-y = -march=rv32imac_zicsr_zifencei -fno-PIE -fno-pic
 platform-asflags-y = -march=rv32imac_zicsr_zifencei

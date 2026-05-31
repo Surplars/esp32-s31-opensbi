@@ -157,6 +157,24 @@ void __noreturn sbi_hsm_hart_start_finish(struct sbi_scratch *scratch,
 	sbi_hart_switch_mode(hartid, next_arg1, next_addr, next_mode, false);
 }
 
+static void hsm_wait_for_interrupt(void)
+{
+#ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
+	/*
+	 * ESP32-S31 uses a matrix-routed CLIC line for OpenSBI IPIs. Enable
+	 * global MIE around WFI so a stopped hart can take the CLIC IPI that
+	 * drives the standard HSM START_PENDING transition.
+	 */
+	ulong saved_mstatus = csr_read(CSR_MSTATUS);
+
+	csr_set(CSR_MSTATUS, MSTATUS_MIE);
+	wfi();
+	csr_write(CSR_MSTATUS, saved_mstatus);
+#else
+	wfi();
+#endif
+}
+
 static void sbi_hsm_hart_wait(struct sbi_scratch *scratch)
 {
 	unsigned long saved_mie;
@@ -179,7 +197,7 @@ static void sbi_hsm_hart_wait(struct sbi_scratch *scratch)
 			hsm_device_hart_stop();
 		}
 
-		wfi();
+		hsm_wait_for_interrupt();
 	}
 
 	/* Restore MIE CSR */
@@ -360,8 +378,19 @@ int sbi_hsm_hart_start(struct sbi_scratch *scratch,
 		goto err;
 	}
 
+#ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
+	/*
+	 * ESP32-S31's stopped secondary hart can be either waiting in OpenSBI
+	 * warmboot or still held by the SoC core reset/stall controls. Use the
+	 * platform HSM start hook for hart1 in both cases so HSM START does not
+	 * depend on raw IPI wakeup from CLIC WFI.
+	 */
+	if (hartid == 1 && hsm_dev && hsm_dev->hart_start) {
+		rc = hsm_device_hart_start(hartid, scratch->warmboot_addr);
+	} else
+#endif
 	if ((hsm_device_has_hart_hotplug() && (entry_count == init_count)) ||
-	   (hsm_device_has_hart_secondary_boot() && !init_count)) {
+	    (hsm_device_has_hart_secondary_boot() && !init_count)) {
 		rc = hsm_device_hart_start(hartid, scratch->warmboot_addr);
 	} else {
 		rc = sbi_ipi_raw_send(hartindex, true);

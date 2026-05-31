@@ -243,6 +243,11 @@ static int sbi_trap_nonaia_irq(unsigned long irq)
 		sbi_timer_process();
 		break;
 #endif
+#ifdef OPENSBI_PLATFORM_ESP32S31_CLIC_IPI_IRQ
+	case OPENSBI_PLATFORM_ESP32S31_CLIC_IPI_IRQ:
+		sbi_ipi_process();
+		break;
+#endif
 	case IRQ_M_SOFT:
 		sbi_ipi_process();
 		break;
@@ -273,6 +278,11 @@ static int sbi_trap_aia_irq(void)
 #ifdef OPENSBI_PLATFORM_ESP32S31_CLIC_TIMER_IRQ
 		case OPENSBI_PLATFORM_ESP32S31_CLIC_TIMER_IRQ:
 			sbi_timer_process();
+			break;
+#endif
+#ifdef OPENSBI_PLATFORM_ESP32S31_CLIC_IPI_IRQ
+		case OPENSBI_PLATFORM_ESP32S31_CLIC_IPI_IRQ:
+			sbi_ipi_process();
 			break;
 #endif
 		case IRQ_M_SOFT:

@@ -19,6 +19,7 @@
 #include <sbi/sbi_hart_pmp.h>
 #include <sbi/sbi_platform.h>
 #include <sbi/sbi_pmu.h>
+#include <sbi/sbi_scratch.h>
 #include <sbi/sbi_string.h>
 #include <sbi/sbi_trap.h>
 
@@ -30,19 +31,18 @@ void (*sbi_hart_expected_trap)(void) = &__sbi_expected_trap;
 unsigned long hart_features_offset;
 
 #ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
-static void esp_allow_su_all_pmp(void)
+static void esp_init_expected_trap(void)
 {
+	if (misa_extension('H'))
+		sbi_hart_expected_trap = &__sbi_expected_trap_hext;
+
 	/*
-	 * ESP32-S31 reports no usable generic PMP feature information through
-	 * the current CLIC-safe probe path, but S/U payloads still need access
-	 * to SRAM and memory-mapped devices. Install one permissive PMP entry
-	 * before leaving M-mode.
+	 * ESP32-S31 CLIC requires mtvec mode 3 and a 64-byte aligned handler.
+	 * The expected-trap entry points are aligned separately in assembly.
 	 */
-	csr_write(CSR_PMPADDR0, ~0UL);
-	csr_write(CSR_PMPCFG0, PMP_R | PMP_W | PMP_X | PMP_A_NAPOT);
+	sbi_hart_expected_trap =
+		(void (*)(void))((ulong)sbi_hart_expected_trap | MTVEC_MODE);
 }
-#else
-static inline void esp_allow_su_all_pmp(void) { }
 #endif
 
 static void mstatus_init(struct sbi_scratch *scratch)
@@ -554,16 +554,6 @@ static int hart_detect_features(struct sbi_scratch *scratch)
 	if (rc)
 		return rc;
 
-#ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
-	/*
-	 * ESP32-S31 uses CLIC mode 3. The generic trap-based CSR/PMP probe
-	 * is not CLIC-safe yet, so the platform hook above provides the known
-	 * minimum feature set and we skip the unsafe probe body.
-	 */
-	hfeatures->detected = true;
-	return 0;
-#endif
-
 	if (sbi_hart_has_extension(scratch, SBI_HART_EXT_SMRNMI)) {
 		const struct sbi_platform *plat = sbi_platform_thishart_ptr();
 		const struct sbi_platform_operations *ops = sbi_platform_ops(plat);
@@ -782,19 +772,30 @@ int sbi_hart_init(struct sbi_scratch *scratch, bool cold_boot)
 {
 	int rc;
 
+#ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
+	if (cold_boot)
+		esp_init_expected_trap();
+#endif
+
 	/*
 	 * Clear mip CSR before proceeding with init to avoid any spurious
 	 * external interrupts in S-mode.
 	 */
 #ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
-	/* ESP32-S31 CLIC path does not tolerate direct MIP writes here. */
+	{
+		struct sbi_trap_info trap = { 0 };
+
+		csr_write_allowed(CSR_MIP, &trap, 0);
+	}
 #else
 	csr_write(CSR_MIP, 0);
 #endif
 
 	if (cold_boot) {
+#ifndef OPENSBI_PLATFORM_ESP32S31_CLIC
 		if (misa_extension('H'))
 			sbi_hart_expected_trap = &__sbi_expected_trap_hext;
+#endif
 
 		hart_features_offset = sbi_scratch_alloc_offset(
 					sizeof(struct sbi_hart_features));
@@ -836,7 +837,7 @@ sbi_hart_switch_mode(unsigned long arg0, unsigned long arg1,
 		     bool next_virt)
 {
 #if __riscv_xlen == 32
-	unsigned long val, valH;
+	unsigned long val, valH = 0;
 #else
 	unsigned long val;
 #endif
@@ -863,14 +864,18 @@ sbi_hart_switch_mode(unsigned long arg0, unsigned long arg1,
 	if (misa_extension('H')) {
 		valH = csr_read(CSR_MSTATUSH);
 		valH = INSERT_FIELD(valH, MSTATUSH_MPV, next_virt);
+#ifndef OPENSBI_PLATFORM_ESP32S31_CLIC
 		csr_write(CSR_MSTATUSH, valH);
+#endif
 	}
 #else
 	if (misa_extension('H'))
 		val = INSERT_FIELD(val, MSTATUS_MPV, next_virt);
 #endif
+#ifndef OPENSBI_PLATFORM_ESP32S31_CLIC
 	csr_write(CSR_MSTATUS, val);
 	csr_write(CSR_MEPC, next_addr);
+#endif
 
 	if (next_mode == PRV_S) {
 		if (next_virt) {
@@ -882,10 +887,11 @@ sbi_hart_switch_mode(unsigned long arg0, unsigned long arg1,
 			csr_write(CSR_STVEC, next_addr);
 			csr_write(CSR_SSCRATCH, 0);
 #ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
-			/*
-			 * ESP32-S31 CLIC path does not tolerate direct SIE writes
-			 * here. Interrupts are already disabled at M-mode entry.
-			 */
+			{
+				struct sbi_trap_info trap = { 0 };
+
+				csr_write_allowed(CSR_SIE, &trap, 0);
+			}
 #else
 			csr_write(CSR_SIE, 0);
 #endif
@@ -893,11 +899,13 @@ sbi_hart_switch_mode(unsigned long arg0, unsigned long arg1,
 		}
 	} else if (next_mode == PRV_U) {
 #ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
-		/*
-		 * ESP32-S31 advertises N in misa, but direct user-trap CSR
-		 * writes hang on the current CLIC/TEE path. U-mode execution
-		 * only needs mstatus.MPP=U and mepc; leave U CSRs untouched.
-		 */
+		if (misa_extension('N')) {
+			struct sbi_trap_info trap = { 0 };
+
+			csr_write_allowed(CSR_UTVEC, &trap, next_addr);
+			csr_write_allowed(CSR_USCRATCH, &trap, 0);
+			csr_write_allowed(CSR_UIE, &trap, 0);
+		}
 #else
 		if (misa_extension('N')) {
 			csr_write(CSR_UTVEC, next_addr);
@@ -912,14 +920,18 @@ sbi_hart_switch_mode(unsigned long arg0, unsigned long arg1,
 
 #ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
 	if (next_mode == PRV_U) {
-		/* Keep U-mode ecall in M-mode; there is no usable S trap target here. */
+		/* Keep U-mode ecall in M-mode for SBI service handling. */
 		csr_clear(CSR_MEDELEG, (1UL << CAUSE_USER_ECALL));
 	} else if (next_mode == PRV_S) {
-		/* Keep S-mode ecall in M-mode; MIDELEG is not writable here. */
+		/* Keep S-mode ecall in M-mode for SBI service handling. */
 		csr_clear(CSR_MEDELEG, (1UL << CAUSE_SUPERVISOR_ECALL));
 	}
-
-	esp_allow_su_all_pmp();
+#if __riscv_xlen == 32
+	if (misa_extension('H'))
+		csr_write(CSR_MSTATUSH, valH);
+#endif
+	csr_write(CSR_MSTATUS, val);
+	csr_write(CSR_MEPC, next_addr);
 #endif
 	__asm__ __volatile__("mret" : : "r"(a0), "r"(a1));
 	__builtin_unreachable();

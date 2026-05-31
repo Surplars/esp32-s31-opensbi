@@ -19,7 +19,11 @@
 	 * A4 <- temporary
 	 */
 
+#ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
+	.balign 64
+#else
 	.align 3
+#endif
 	.global __sbi_expected_trap
 __sbi_expected_trap:
 	/* Without H-extension so, MTVAL2 and MTINST CSRs and GVA not available */
@@ -37,7 +41,11 @@ __sbi_expected_trap:
 	csrw	CSR_MEPC, a4
 	mret
 
+#ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
+	.balign 64
+#else
 	.align 3
+#endif
 	.global __sbi_expected_trap_hext
 __sbi_expected_trap_hext:
 	/* With H-extension so, MTVAL2 and MTINST CSRs and GVA available */

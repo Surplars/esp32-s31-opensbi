@@ -158,14 +158,18 @@ int clic_esp_is_pending(int irq)
  * Route an interrupt source to a CPU interrupt line via the interrupt matrix.
  *
  * ESP32-S31 has an interrupt matrix that maps peripheral interrupt sources
- * to CPU CLIC interrupt lines. Each source register is at:
- *   CORE0_BASE + 4 * source_number
+ * to per-core CPU CLIC interrupt lines. Each source register is at:
+ *   CORE{n}_BASE + 4 * source_number
  * The lower 6 bits of the register value select the CPU interrupt line.
  */
-void clic_esp_route_interrupt(int intr_src, int cpu_int_num)
+void clic_esp_route_interrupt_to_hart(int hart_id, int intr_src, int cpu_int_num)
 {
-	unsigned long reg_addr = ESP32S31_INTR_CORE0_BASE + 4 * intr_src;
+	unsigned long base;
+	unsigned long reg_addr;
 	u32 val;
+
+	base = hart_id ? ESP32S31_INTR_CORE1_BASE : ESP32S31_INTR_CORE0_BASE;
+	reg_addr = base + 4 * intr_src;
 
 	val = *(volatile u32 *)reg_addr;
 	val &= ~(ESP32S31_INTR_MAP_CPU_INT_MASK |
@@ -173,4 +177,12 @@ void clic_esp_route_interrupt(int intr_src, int cpu_int_num)
 	val |= (cpu_int_num & ESP32S31_INTR_MAP_CPU_INT_MASK) |
 	       ESP32S31_INTR_MAP_PASS_LEVEL_M;
 	*(volatile u32 *)reg_addr = val;
+}
+
+void clic_esp_route_interrupt(int intr_src, int cpu_int_num)
+{
+	unsigned long hartid;
+
+	asm volatile("csrr %0, mhartid" : "=r"(hartid));
+	clic_esp_route_interrupt_to_hart(hartid, intr_src, cpu_int_num);
 }

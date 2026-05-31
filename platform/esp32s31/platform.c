@@ -11,11 +11,13 @@
  */
 
 #include <sbi/riscv_asm.h>
+#include <sbi/riscv_barrier.h>
 #include <sbi/riscv_encoding.h>
 #include <sbi/sbi_const.h>
 #include <sbi/sbi_platform.h>
 #include <sbi/sbi_console.h>
 #include <sbi/sbi_hart.h>
+#include <sbi/sbi_hsm.h>
 #include <sbi/sbi_timer.h>
 #include <sbi/sbi_ipi.h>
 #include <sbi/sbi_error.h>
@@ -32,7 +34,10 @@ extern int uart_esp_getc(void);
 extern int clic_esp_init(void);
 extern int clic_esp_enable_irq(int irq);
 extern int clic_esp_set_priority(int irq, int priority);
+extern void clic_esp_clear_pending(int irq);
 extern void clic_esp_route_interrupt(int intr_src, int cpu_int_num);
+extern void clic_esp_route_interrupt_to_hart(int hart_id, int intr_src,
+					     int cpu_int_num);
 
 extern int timer_esp_init(unsigned long base, u32 freq);
 extern u64 timer_esp_get_mtime(void);
@@ -129,6 +134,89 @@ static struct sbi_ipi_device esp_ipi = {
 	.ipi_clear	= esp_ipi_clear,
 };
 
+/* HSM secondary boot device */
+static inline u32 esp_readl(unsigned long addr)
+{
+	return *(volatile u32 *)addr;
+}
+
+static inline void esp_writel(u32 val, unsigned long addr)
+{
+	*(volatile u32 *)addr = val;
+}
+
+static void esp_hart1_unstall(void)
+{
+	u32 val = esp_readl(ESP32S31_PMU_BASE + ESP32S31_PMU_CPU_STALL_SW);
+
+	val &= ~ESP32S31_PMU_HPCORE1_SW_STALL_CODE_M;
+	val |= 0xffU << ESP32S31_PMU_HPCORE1_SW_STALL_CODE_S;
+	esp_writel(val, ESP32S31_PMU_BASE + ESP32S31_PMU_CPU_STALL_SW);
+}
+
+static void esp_hart1_assert_reset(void)
+{
+	unsigned long lp_reset = ESP32S31_LP_AONCLKRST_BASE +
+				 ESP32S31_LP_AONCLKRST_HPCORE1_RESET_CTRL;
+	unsigned long hp_reset = ESP32S31_HP_SYS_CLKRST_BASE +
+				 ESP32S31_HP_SYS_CLKRST_HPCORE1_CTRL0;
+
+	esp_writel(esp_readl(lp_reset) | ESP32S31_LP_AONCLKRST_HPCORE_SW_RESET,
+		   lp_reset);
+	esp_writel(esp_readl(hp_reset) |
+		   ESP32S31_HP_SYS_CLKRST_CORE1_GLOBAL_RST_EN,
+		   hp_reset);
+}
+
+static void esp_hart1_enable_clock(void)
+{
+	unsigned long reg = ESP32S31_HP_SYS_CLKRST_BASE +
+			    ESP32S31_HP_SYS_CLKRST_HPCORE1_CTRL0;
+	u32 val = esp_readl(reg);
+
+	val |= ESP32S31_HP_SYS_CLKRST_CORE1_CPU_CLK_EN |
+	       ESP32S31_HP_SYS_CLKRST_CORE1_CLIC_CLK_EN;
+	val &= ~ESP32S31_HP_SYS_CLKRST_CORE1_GLOBAL_RST_EN;
+	esp_writel(val, reg);
+}
+
+static void esp_hart1_clear_reset(void)
+{
+	unsigned long reg = ESP32S31_LP_AONCLKRST_BASE +
+			    ESP32S31_LP_AONCLKRST_HPCORE1_RESET_CTRL;
+	u32 val = esp_readl(reg);
+
+	val &= ~ESP32S31_LP_AONCLKRST_HPCORE_SW_RESET;
+	esp_writel(val, reg);
+}
+
+static int esp_hsm_hart_start(u32 hartid, ulong saddr)
+{
+	if (hartid != 1)
+		return SBI_EINVAL;
+
+	/*
+	 * Use the same app CPU control registers as ESP-IDF/bootloader, but
+	 * force a reset first so a hart that never reached OpenSBI warmboot is
+	 * brought back to the requested warmboot vector. Raw IPIs only work
+	 * after the target hart is already waiting in OpenSBI.
+	 */
+	esp_hart1_assert_reset();
+	esp_writel((u32)saddr, ESP32S31_LP_SYS_BASE +
+			    ESP32S31_LP_SYSTEM_BOOT_ADDR_HP_CORE1);
+	wmb();
+	esp_hart1_enable_clock();
+	esp_hart1_clear_reset();
+	esp_hart1_unstall();
+
+	return 0;
+}
+
+static struct sbi_hsm_device esp_hsm = {
+	.name		= "esp32s31-hsm",
+	.hart_start	= esp_hsm_hart_start,
+};
+
 /* System reset device */
 static int esp_system_reset_check(u32 reset_type, u32 reset_reason)
 {
@@ -195,9 +283,27 @@ static int esp_extensions_init(struct sbi_hart_features *hfeatures)
 
 static int esp_nascent_init(void)
 {
+	u32 hartid = current_hartid();
+
 	uart_esp_init(ESP32S31_UART0_BASE,
 		      ESP32S31_UART_INPUT_FREQ,
 		      ESP32S31_UART_BAUDRATE);
+
+	/*
+	 * Warm harts enter sbi_hsm_hart_wait() before irqchip/ipis are
+	 * initialized, so initialize the local CLIC and enable the IPI line
+	 * early enough for SBI HSM hart_start to wake them.
+	 */
+	if (hartid < ESP32S31_HART_COUNT) {
+		clic_esp_init();
+		clic_esp_route_interrupt_to_hart(hartid,
+					ESP32S31_CPU_INTR_FROM_CPU_0 + hartid,
+					ESP32S31_IPI_CLIC_INTNUM);
+		clic_esp_clear_pending(ESP32S31_IPI_CLIC_INTNUM);
+		clic_esp_set_priority(ESP32S31_IPI_CLIC_INTNUM, 4);
+		clic_esp_enable_irq(ESP32S31_IPI_CLIC_INTNUM);
+	}
+
 	return 0;
 }
 
@@ -227,6 +333,7 @@ static int esp_early_init(bool cold_boot)
 
 	/* Register IPI device so OpenSBI core can use it */
 	sbi_ipi_add_device(&esp_ipi);
+	sbi_hsm_set_device(&esp_hsm);
 
 	return 0;
 }
@@ -255,6 +362,10 @@ static int esp_irqchip_init(void)
 	 */
 	clic_esp_set_priority(11, 4);
 	clic_esp_enable_irq(11);
+
+	/* Enable the CLIC line used by OpenSBI IPIs and HSM wakeups. */
+	clic_esp_set_priority(ESP32S31_IPI_CLIC_INTNUM, 4);
+	clic_esp_enable_irq(ESP32S31_IPI_CLIC_INTNUM);
 
 	/* Route SYSTIMER target0 alarm to the CLIC line handled as M-timer. */
 	clic_esp_route_interrupt(ESP32S31_SYSTIMER_TARGET0_INTR_SOURCE,

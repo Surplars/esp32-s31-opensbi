@@ -63,7 +63,7 @@ _bss_zero:
 _start_warm:
 	/* Disable and clear all interrupts */
 #ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
-	/* ESP32-S31 CLIC path does not tolerate direct SIE/SIP writes. */
+	/* ESP32-S31 routes test interrupts through CLIC-managed M-mode paths. */
 #else
 	csrw	CSR_SIE, zero
 	csrw	CSR_SIP, zero
@@ -86,6 +86,41 @@ _start_warm:
 	call	test_main
 
 	/* We don't expect to reach here hence just hang */
+	j	_start_hang
+
+	.section .entry, "ax", %progbits
+	.align 3
+	.globl test_secondary_entry
+test_secondary_entry:
+	/* Secondary harts enter here via SBI HSM hart_start. */
+#ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
+#else
+	csrw	CSR_SIE, zero
+	csrw	CSR_SIP, zero
+#endif
+	lla	a3, _start_hang
+	csrw	CSR_STVEC, a3
+	lla	a3, _payload_end
+	li	a4, 0x4000
+	add	sp, a3, a4
+	call	test_secondary_main
+	j	_start_hang
+
+	.section .entry, "ax", %progbits
+	.align 3
+	.globl test_rfence_secondary_entry
+test_rfence_secondary_entry:
+#ifdef OPENSBI_PLATFORM_ESP32S31_CLIC
+#else
+	csrw	CSR_SIE, zero
+	csrw	CSR_SIP, zero
+#endif
+	lla	a3, _start_hang
+	csrw	CSR_STVEC, a3
+	lla	a3, _payload_end
+	li	a4, 0x6000
+	add	sp, a3, a4
+	call	test_rfence_secondary_main
 	j	_start_hang
 
 	.section .entry, "ax", %progbits
@@ -123,7 +158,7 @@ s_trap_entry:
 	csrr	t0, CSR_SCAUSE
 	li	t1, 0x80000000
 	and	t1, t0, t1
-	beqz	t1, _s_trap_done
+	beqz	t1, _s_trap_exception
 	li	t1, 0xfff
 	and	t0, t0, t1
 	li	t1, IRQ_S_TIMER
@@ -131,6 +166,31 @@ s_trap_entry:
 	lla	t0, timer_seen
 	li	t1, 1
 	REG_S	t1, 0(t0)
+	j	_s_trap_done
+_s_trap_exception:
+	lla	t1, sv32_fault_expected
+	REG_L	t2, 0(t1)
+	beqz	t2, _s_trap_done
+	li	t2, 0
+	REG_S	t2, 0(t1)
+	lla	t1, sv32_fault_seen
+	li	t2, 1
+	REG_S	t2, 0(t1)
+	lla	t1, sv32_fault_cause
+	REG_S	t0, 0(t1)
+	csrr	t2, CSR_STVAL
+	lla	t1, sv32_fault_tval
+	REG_S	t2, 0(t1)
+	csrr	t2, CSR_SEPC
+	lla	t1, sv32_fault_epc
+	REG_S	t2, 0(t1)
+	lla	t1, sv32_fault_resume_pc
+	REG_L	t2, 0(t1)
+	bnez	t2, _s_trap_set_resume
+	csrr	t2, CSR_SEPC
+	addi	t2, t2, 4
+_s_trap_set_resume:
+	csrw	CSR_SEPC, t2
 _s_trap_done:
 	REG_L	ra, (0 * __SIZEOF_POINTER__)(sp)
 	REG_L	t0, (1 * __SIZEOF_POINTER__)(sp)
@@ -150,6 +210,51 @@ _s_trap_done:
 	REG_L	t6, (15 * __SIZEOF_POINTER__)(sp)
 	addi	sp, sp, (S_TRAP_REGS * __SIZEOF_POINTER__)
 	sret
+
+	.section .text
+	.align 3
+	.globl sv32_identity_exec_probe
+sv32_identity_exec_probe:
+	ret
+
+	.section .text
+	.align 3
+	.globl sv32_fault_load_probe
+sv32_fault_load_probe:
+	lla	t0, _sv32_fault_resume
+	lla	t1, sv32_fault_resume_pc
+	REG_S	t0, 0(t1)
+	.option push
+	.option norvc
+	lw	a0, 0(a0)
+	.option pop
+_sv32_fault_resume:
+	ret
+
+	.section .text
+	.align 3
+	.globl sv32_fault_store_probe
+sv32_fault_store_probe:
+	lla	t0, _sv32_store_resume
+	lla	t1, sv32_fault_resume_pc
+	REG_S	t0, 0(t1)
+	.option push
+	.option norvc
+	sw	a1, 0(a0)
+	.option pop
+_sv32_store_resume:
+	ret
+
+	.section .text
+	.align 3
+	.globl sv32_fault_exec_probe
+sv32_fault_exec_probe:
+	lla	t0, _sv32_exec_resume
+	lla	t1, sv32_fault_resume_pc
+	REG_S	t0, 0(t1)
+	jr	a0
+_sv32_exec_resume:
+	ret
 
 	.section .data
 	.align	3
