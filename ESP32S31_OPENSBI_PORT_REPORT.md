@@ -776,3 +776,33 @@ Sv32 RFENCE test OK
 - `sbi_hart_switch_mode()` 的 ESP32-S31 CLIC 路径在所有可能触发 expected-trap 的 CSR 探测之后才最终写 `MSTATUSH/MSTATUS/MEPC`，避免 `mret` 前目标入口被 trap 恢复逻辑覆盖。
 
 之前用于定位问题的 `[h1 warm ...]`、`[hsm start ...]`、`[hsm finish ...]`、`[h1 trap ...]`、`[h1 nascent]` 和 secondary entry marker 均已删除。保留的是正式支持代码和 payload testbench。
+
+## PMU decision, 2026-05-31
+
+OpenSBI 的 `PMU` 指 RISC-V performance monitoring unit/SBI PMU，不是 ESP32-S31 SoC 内用于电源、reset、stall 的 PMU 外设。当前 generic probe 结果为：
+
+```text
+Platform PMU Device         : ---
+Boot HART MHPM Info         : 0 (0x00000000)
+```
+
+这表示标准 `mhpmcounter3+ / mhpmevent3+` 可编程性能计数器没有被探测到。S31 仍有 `zicntr`，所以 `cycle/time/instret` 固定计数器可用；但这些固定计数器由 OpenSBI generic PMU 路径处理，不需要注册平台 PMU device。
+
+因此当前不添加 `esp32s31-pmu`，避免把 ESP power PMU 误报为 SBI performance PMU。后续只有在确认存在可编程 performance event selector 或非标准 HPM counter 后，再补 `pmu_init` / `pmu_xlate_to_mhpmevent` / platform firmware counter。
+
+## Firmware mode decision, 2026-05-31
+
+ESP32-S31 平台默认固件类型已从 bring-up 用 `FW_PAYLOAD` 切回真实链路使用的 `FW_JUMP`：
+
+```make
+FW_JUMP=y
+FW_JUMP_ADDR=0x2F050000
+```
+
+这与当前内存布局一致：bootloader 将 OpenSBI 放到 `0x2F020000`，OpenSBI 完成 M-mode 初始化后跳到 `0x2F050000` 的下一阶段 S-mode 固件。测试 payload 仍保留，但作为显式回归模式使用：
+
+```sh
+make PLATFORM=esp32s31 FW_JUMP= FW_PAYLOAD=y FW_PAYLOAD_OFFSET=0x30000
+```
+
+因此后续真实固件验证应基于 `fw_jump.bin`，而不是默认嵌入 test payload 的 `fw_payload.bin`。

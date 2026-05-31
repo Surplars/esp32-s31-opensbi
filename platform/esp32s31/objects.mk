@@ -23,11 +23,9 @@ platform-objs-y += clic_esp.o
 platform-objs-y += timer_esp.o
 platform-objs-y += ipi_esp.o
 
-# FW_JUMP=y
-FW_PAYLOAD=y
-FW_PAYLOAD_OFFSET=0x30000
-ifeq ($(PLATFORM_RISCV_XLEN), 32)
-# FW_JUMP_ADDR=0x2F050000
-else
-# FW_JUMP_ADDR=0x2F050000
-endif
+# Real firmware uses FW_JUMP and expects the next S-mode stage at 0x2F050000.
+FW_JUMP=y
+FW_JUMP_ADDR=0x2F050000
+
+# For bring-up regression tests, override the firmware type from make:
+#   make PLATFORM=esp32s31 FW_JUMP= FW_PAYLOAD=y FW_PAYLOAD_OFFSET=0x30000
